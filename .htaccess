@@ -1,0 +1,50 @@
+# backend/.htaccess
+# Clean URL routing for VetCare REST API
+# Place this in your backend root (e.g. /var/www/html/vetcare/api/)
+
+Options -Indexes
+Options -MultiViews
+
+RewriteEngine On
+
+# ── Security headers ───────────────────────────────────────────
+Header always set X-Content-Type-Options "nosniff"
+Header always set X-Frame-Options "DENY"
+Header always set X-XSS-Protection "1; mode=block"
+Header always set Referrer-Policy "strict-origin-when-cross-origin"
+
+# ── CORS preflight ────────────────────────────────────────────
+RewriteCond %{REQUEST_METHOD} OPTIONS
+RewriteRule ^(.*)$ $1 [R=200,L]
+
+Header always set Access-Control-Allow-Origin  "*"
+Header always set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+Header always set Access-Control-Allow-Headers "Authorization, Content-Type, Accept"
+
+# ── Route /auth/* ──────────────────────────────────────────────
+RewriteRule ^auth/register$      api/auth/register.php   [L,QSA]
+RewriteRule ^auth/login$         api/auth/login.php      [L,QSA]
+RewriteRule ^auth/refresh$       api/auth/refresh.php    [L,QSA]
+
+# ── Route /animals/* ──────────────────────────────────────────
+RewriteRule ^animals/([0-9]+)$   api/animals/index.php   [L,QSA,E=ANIMAL_ID:$1]
+RewriteRule ^animals$            api/animals/index.php   [L,QSA]
+
+# ── Route /treatments/* ───────────────────────────────────────
+RewriteRule ^treatments/([0-9]+)$ api/treatments/index.php [L,QSA,E=TREAT_ID:$1]
+RewriteRule ^treatments$          api/treatments/index.php [L,QSA]
+
+# ── Route /prescriptions ──────────────────────────────────────
+RewriteRule ^prescriptions$      api/prescriptions/index.php [L,QSA]
+
+# ── Route /tracking/* ─────────────────────────────────────────
+RewriteRule ^tracking/update$        api/tracking/index.php [L,QSA]
+RewriteRule ^tracking/([0-9]+)$      api/tracking/index.php [L,QSA,E=DOCTOR_ID:$1]
+
+# ── Route /doctors/* ──────────────────────────────────────────
+RewriteRule ^doctors/nearby$         api/doctors/nearby.php  [L,QSA]
+RewriteRule ^doctors/([0-9]+)$       api/doctors/profile.php [L,QSA,E=DOCTOR_ID:$1]
+
+# ── Block sensitive files ──────────────────────────────────────
+RewriteRule ^config/.*$   - [F,L]
+RewriteRule ^\.env$       - [F,L]
