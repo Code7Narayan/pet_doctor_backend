@@ -1,6 +1,6 @@
 # backend/.htaccess
 # Clean URL routing for VetCare REST API
-# Place this in your backend root (e.g. /var/www/html/vetcare/api/)
+# UPDATED: added inventory, customers, vaccinations, reminders routes
 
 Options -Indexes
 Options -MultiViews
@@ -21,30 +21,53 @@ Header always set Access-Control-Allow-Origin  "*"
 Header always set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
 Header always set Access-Control-Allow-Headers "Authorization, Content-Type, Accept"
 
-# ── Route /auth/* ──────────────────────────────────────────────
-RewriteRule ^auth/register$      api/auth/register.php   [L,QSA]
-RewriteRule ^auth/login$         api/auth/login.php      [L,QSA]
-RewriteRule ^auth/refresh$       api/auth/refresh.php    [L,QSA]
+# ── Auth ──────────────────────────────────────────────────────
+RewriteRule ^auth/register$       api/auth/register.php   [L,QSA]
+RewriteRule ^auth/login$          api/auth/login.php      [L,QSA]
+RewriteRule ^auth/refresh$        api/auth/refresh.php    [L,QSA]
 
-# ── Route /animals/* ──────────────────────────────────────────
-RewriteRule ^animals/([0-9]+)$   api/animals/index.php   [L,QSA,E=ANIMAL_ID:$1]
-RewriteRule ^animals$            api/animals/index.php   [L,QSA]
+# ── User profile ───────────────────────────────────────────────
+RewriteRule ^user/profile$        api/user/profile.php    [L,QSA]
 
-# ── Route /treatments/* ───────────────────────────────────────
+# ── Animals ────────────────────────────────────────────────────
+RewriteRule ^animals/([0-9]+)$    api/animals/index.php   [L,QSA,E=ANIMAL_ID:$1]
+RewriteRule ^animals$             api/animals/index.php   [L,QSA]
+
+# ── Treatments ────────────────────────────────────────────────
 RewriteRule ^treatments/([0-9]+)$ api/treatments/index.php [L,QSA,E=TREAT_ID:$1]
 RewriteRule ^treatments$          api/treatments/index.php [L,QSA]
 
-# ── Route /prescriptions ──────────────────────────────────────
-RewriteRule ^prescriptions$      api/prescriptions/index.php [L,QSA]
+# ── Prescriptions ─────────────────────────────────────────────
+RewriteRule ^prescriptions$       api/prescriptions/index.php [L,QSA]
 
-# ── Route /tracking/* ─────────────────────────────────────────
+# ── Vaccinations ──────────────────────────────────────────────
+RewriteRule ^vaccinations/([0-9]+)$ api/vaccinations/index.php [L,QSA,E=VAX_ID:$1]
+RewriteRule ^vaccinations$          api/vaccinations/index.php [L,QSA]
+
+# ── Reminders ─────────────────────────────────────────────────
+RewriteRule ^reminders/([0-9]+)$  api/reminders/index.php [L,QSA,E=REM_ID:$1]
+RewriteRule ^reminders$           api/reminders/index.php [L,QSA]
+
+# ── Tracking ──────────────────────────────────────────────────
 RewriteRule ^tracking/update$        api/tracking/index.php [L,QSA]
 RewriteRule ^tracking/([0-9]+)$      api/tracking/index.php [L,QSA,E=DOCTOR_ID:$1]
 
-# ── Route /doctors/* ──────────────────────────────────────────
+# ── Doctors ───────────────────────────────────────────────────
 RewriteRule ^doctors/nearby$         api/doctors/nearby.php  [L,QSA]
+RewriteRule ^doctors/profile$        api/doctors/profile.php [L,QSA]
 RewriteRule ^doctors/([0-9]+)$       api/doctors/profile.php [L,QSA,E=DOCTOR_ID:$1]
 
-# ── Block sensitive files ──────────────────────────────────────
+# ── Inventory (NEW) ───────────────────────────────────────────
+RewriteRule ^inventory/low-stock$     api/inventory/index.php [L,QSA]
+RewriteRule ^inventory/([0-9]+)$      api/inventory/index.php [L,QSA,E=INV_ID:$1]
+RewriteRule ^inventory$               api/inventory/index.php [L,QSA]
+
+# ── Customers (NEW) ───────────────────────────────────────────
+RewriteRule ^customers/([0-9]+)/pay$  api/customers/index.php [L,QSA,E=CUST_ID:$1]
+RewriteRule ^customers/([0-9]+)$      api/customers/index.php [L,QSA,E=CUST_ID:$1]
+RewriteRule ^customers$               api/customers/index.php [L,QSA]
+
+# ── Block sensitive files ─────────────────────────────────────
 RewriteRule ^config/.*$   - [F,L]
 RewriteRule ^\.env$       - [F,L]
+RewriteRule ^cron/.*$     - [F,L]

@@ -1,0 +1,40 @@
+|-- api
+    |-- animals
+        |-- index.php
+    |-- auth
+        |-- login.php
+        |-- refresh.php
+        |-- register.php
+    |-- customers
+        |-- index.php
+    |-- doctors
+        |-- nearby.php
+        |-- profile.php
+    |-- inventory
+        |-- index.php
+    |-- prescriptions
+        |-- index.php
+    |-- reminders
+        |-- index.php
+    |-- tracking
+        |-- index.php
+    |-- treatments
+        |-- index.php
+    |-- user
+        |-- profile.php
+    |-- vaccinations
+        |-- index.php
+|-- config
+    |-- database.php
+    |-- firebase.php
+    |-- jwt.php
+|-- cron
+    |-- send_reminders.php
+|-- middleware
+    |-- auth.php
+    |-- rate_limiter.php
+|-- utils
+    |-- response_helper.php
+|-- .htaccess
+|-- structure.txt
+|-- test_api.php

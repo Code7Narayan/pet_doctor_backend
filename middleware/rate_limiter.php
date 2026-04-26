@@ -72,4 +72,4 @@ class RateLimiter {
 //   PRIMARY KEY (`id`),
 //   KEY `idx_key_created` (`key`, `created_at`),
 //   KEY `idx_expires`     (`expires_at`)
-// ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+// ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4; 
