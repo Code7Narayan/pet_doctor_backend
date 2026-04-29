@@ -1,9 +1,9 @@
 <?php
 // backend/api/treatments/index.php
 // POST   /api/treatments          → owner: request treatment
-// GET    /api/treatments          → list (owner sees own | doctor sees pending/accepted)
-// GET    /api/treatments/{id}     → treatment detail
-// PUT    /api/treatments/{id}     → doctor: accept/reject/complete + add notes
+// GET    /api/treatments          → list
+// GET    /api/treatments/{id}     → detail
+// PUT    /api/treatments/{id}     → doctor: accept/reject/complete
 
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../middleware/auth.php';
@@ -14,13 +14,20 @@ header('Access-Control-Allow-Methods: GET,POST,PUT');
 header('Access-Control-Allow-Headers: Authorization,Content-Type');
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') exit;
 
-$auth        = AuthMiddleware::requireAuth('owner', 'doctor');
-$userId      = $auth['sub'];
-$role        = $auth['role'];
-$db          = Database::getConnection();
-$method      = $_SERVER['REQUEST_METHOD'];
-$treatmentId = (int) (basename(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH)));
-if (!is_numeric(basename(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH)))) $treatmentId = 0;
+$auth   = AuthMiddleware::requireAuth('owner', 'doctor');
+$userId = $auth['sub'];
+$role   = $auth['role'];
+$db     = Database::getConnection();
+$method = $_SERVER['REQUEST_METHOD'];
+
+// ── FIXED: Parse treatment ID from query param first, then URL path ──
+// Android sends: PUT treatments/index.php?id=5
+// .htaccess clean URL sends: PUT treatments/5 → parsed from path
+$treatmentId = (int)($_GET['id'] ?? 0);
+if (!$treatmentId) {
+    $lastSeg = basename(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH));
+    if (is_numeric($lastSeg)) $treatmentId = (int)$lastSeg;
+}
 
 // ── POST: Owner requests treatment ────────────────────────────
 if ($method === 'POST') {
@@ -34,13 +41,12 @@ if ($method === 'POST') {
         respond(false, 'animal_id and symptoms are required', [], 422);
     }
 
-    // Verify animal belongs to owner
     $stmt = $db->prepare('SELECT id, name FROM animals WHERE id = ? AND owner_id = ? AND is_active = 1');
     $stmt->execute([$animalId, $userId]);
     $animal = $stmt->fetch();
     if (!$animal) respond(false, 'Animal not found or access denied', [], 404);
 
-    // Prevent duplicate pending request for same animal
+    // Prevent duplicate active request
     $stmt = $db->prepare("
         SELECT id FROM treatments
         WHERE animal_id = ? AND status IN ('pending','accepted','in_progress')
@@ -51,17 +57,20 @@ if ($method === 'POST') {
         respond(false, 'An active treatment request already exists for this animal', [], 409);
     }
 
+    $doctorId = !empty($body['doctor_id']) ? (int)$body['doctor_id'] : null;
+
     $stmt = $db->prepare('
         INSERT INTO treatments
-            (animal_id, owner_id, symptoms, status, owner_lat, owner_lng, visit_type)
-        VALUES (?, ?, ?, "pending", ?, ?, ?)
+            (animal_id, owner_id, doctor_id, symptoms, status, owner_lat, owner_lng, visit_type)
+        VALUES (?, ?, ?, ?, "pending", ?, ?, ?)
     ');
     $stmt->execute([
         $animalId,
         $userId,
+        $doctorId,
         $symptoms,
-        $body['lat']        ?: null,
-        $body['lng']        ?: null,
+        $body['lat']        ?? null,
+        $body['lng']        ?? null,
         $body['visit_type'] ?? 'home_visit',
     ]);
 
@@ -73,10 +82,10 @@ if ($method === 'POST') {
 
 // ── GET list ───────────────────────────────────────────────────
 if ($method === 'GET' && !$treatmentId) {
-    $page   = max(1, (int)($_GET['page'] ?? 1));
+    $page   = max(1, (int)($_GET['page']  ?? 1));
     $limit  = min(50, (int)($_GET['limit'] ?? 15));
     $offset = ($page - 1) * $limit;
-    $status = $_GET['status'] ?? '';  // optional filter
+    $status = $_GET['status'] ?? '';
 
     $where  = '';
     $params = [];
@@ -85,7 +94,6 @@ if ($method === 'GET' && !$treatmentId) {
         $where    = 'WHERE t.owner_id = ?';
         $params[] = $userId;
     } else {
-        // Doctor sees: pending (all) + their own accepted/in_progress/completed
         $where    = "WHERE (t.status = 'pending' OR t.doctor_id = ?)";
         $params[] = $userId;
     }
@@ -120,7 +128,7 @@ if ($method === 'GET' && !$treatmentId) {
     ]);
 }
 
-// ── GET single treatment ───────────────────────────────────────
+// ── GET single ─────────────────────────────────────────────────
 if ($method === 'GET' && $treatmentId) {
     $stmt = $db->prepare('
         SELECT
@@ -141,12 +149,10 @@ if ($method === 'GET' && $treatmentId) {
     $t = $stmt->fetch();
     if (!$t) respond(false, 'Treatment not found', [], 404);
 
-    // Access control
     $allowed = ($role === 'owner' && (int)$t['owner_id'] === $userId)
             || ($role === 'doctor' && ((int)$t['doctor_id'] === $userId || $t['status'] === 'pending'));
     if (!$allowed) respond(false, 'Access denied', [], 403);
 
-    // Prescriptions
     $stmt = $db->prepare('SELECT * FROM prescriptions WHERE treatment_id = ?');
     $stmt->execute([$treatmentId]);
     $t['prescriptions'] = $stmt->fetchAll();
@@ -154,30 +160,34 @@ if ($method === 'GET' && $treatmentId) {
     respond(true, 'Treatment detail', ['treatment' => $t]);
 }
 
-// ── PUT: Update treatment status / notes ───────────────────────
+// ── PUT: Update treatment ──────────────────────────────────────
 if ($method === 'PUT' && $treatmentId) {
     $body   = body();
-    $action = $body['action'] ?? '';  // accept | reject | complete | update_notes
+    $action = trim($body['action'] ?? '');
 
     $stmt = $db->prepare('SELECT * FROM treatments WHERE id = ? LIMIT 1');
     $stmt->execute([$treatmentId]);
     $t = $stmt->fetch();
     if (!$t) respond(false, 'Treatment not found', [], 404);
 
-    // ── Doctor actions ──────────────────────────────────────────
+    // ── Doctor actions ──────────────────────────────────────
     if ($role === 'doctor') {
         if ($action === 'accept') {
-            if ($t['status'] !== 'pending') respond(false, 'Treatment is not pending', [], 409);
+            if ($t['status'] !== 'pending') {
+                respond(false, 'Treatment is not pending', [], 409);
+            }
             $db->prepare("
                 UPDATE treatments
                 SET status='accepted', doctor_id=?, accepted_at=NOW()
                 WHERE id=?
             ")->execute([$userId, $treatmentId]);
-            respond(true, 'Treatment accepted');
+
+            // Notify owner via FCM (optional – requires firebase.php)
+            respond(true, 'Treatment accepted successfully');
         }
 
         if ($action === 'reject') {
-            if ($t['status'] !== 'pending') respond(false, 'Cannot reject', [], 409);
+            if ($t['status'] !== 'pending') respond(false, 'Cannot reject this treatment', [], 409);
             $db->prepare("
                 UPDATE treatments
                 SET status='rejected', rejection_reason=?
@@ -196,26 +206,24 @@ if ($method === 'PUT' && $treatmentId) {
             if ((int)$t['doctor_id'] !== $userId) respond(false, 'Not your case', [], 403);
             $db->prepare("
                 UPDATE treatments
-                SET status='completed', completed_at=NOW(),
-                    diagnosis=?, treatment_notes=?
+                SET status='completed', completed_at=NOW(), diagnosis=?, treatment_notes=?
                 WHERE id=?
             ")->execute([
-                $body['diagnosis']        ?? '',
-                $body['treatment_notes']  ?? '',
+                $body['diagnosis']       ?? '',
+                $body['treatment_notes'] ?? '',
                 $treatmentId,
             ]);
-            respond(true, 'Treatment marked complete');
+            respond(true, 'Treatment marked as complete');
         }
 
         if ($action === 'update_notes') {
-            $db->prepare("
-                UPDATE treatments SET diagnosis=?, treatment_notes=? WHERE id=?
-            ")->execute([$body['diagnosis'] ?? null, $body['treatment_notes'] ?? null, $treatmentId]);
+            $db->prepare("UPDATE treatments SET diagnosis=?, treatment_notes=? WHERE id=?")
+               ->execute([$body['diagnosis'] ?? null, $body['treatment_notes'] ?? null, $treatmentId]);
             respond(true, 'Notes updated');
         }
     }
 
-    // ── Owner actions ──────────────────────────────────────────
+    // ── Owner actions ──────────────────────────────────────
     if ($role === 'owner') {
         if ($action === 'cancel') {
             if (!in_array($t['status'], ['pending', 'accepted'], true)) {
@@ -233,7 +241,6 @@ if ($method === 'PUT' && $treatmentId) {
             $db->prepare("UPDATE treatments SET rating=?, review=? WHERE id=?")
                ->execute([$rating, $body['review'] ?? null, $treatmentId]);
 
-            // Recompute doctor rating
             $stmt = $db->prepare("
                 SELECT AVG(rating) AS avg_r, COUNT(*) AS cnt
                 FROM treatments WHERE doctor_id=? AND rating IS NOT NULL
@@ -247,7 +254,7 @@ if ($method === 'PUT' && $treatmentId) {
         }
     }
 
-    respond(false, 'Unknown action', [], 422);
+    respond(false, 'Unknown action: ' . $action, [], 422);
 }
 
 respond(false, 'Not found', [], 404);

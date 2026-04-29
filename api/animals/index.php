@@ -1,9 +1,9 @@
 <?php
-// backend/api/animals/index.php
+// backend/api/animals/index.php — FIXED
 // GET    /api/animals          → list owner's animals
 // POST   /api/animals          → create animal
-// GET    /api/animals/{id}     → single animal with full history
-// PUT    /api/animals/{id}     → update animal
+// GET    /api/animals?id=X     → single animal with full history
+// PUT    /api/animals?id=X     → update animal
 
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../middleware/auth.php';
@@ -20,10 +20,15 @@ $role   = $auth['role'];
 $db     = Database::getConnection();
 $method = $_SERVER['REQUEST_METHOD'];
 
-// Parse animal ID from URL: /api/animals/42
-$animalId = (int) (explode('/', trim(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH), '/animals/'))[0] ?? 0);
+// ── FIXED: ID from ?id=N query param ─────────────────────────
+$animalId = (int)($_GET['id'] ?? 0);
+if (!$animalId) {
+    // Fallback: numeric last path segment (clean URL via .htaccess)
+    $lastSeg = basename(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH));
+    if (is_numeric($lastSeg)) $animalId = (int)$lastSeg;
+}
 
-// ── POST: Create Animal ────────────────────────────────────────
+// ── POST: Create animal ───────────────────────────────────────
 if ($method === 'POST' && !$animalId) {
     if ($role !== 'owner') respond(false, 'Only owners can add animals', [], 403);
 
@@ -35,7 +40,7 @@ if ($method === 'POST' && !$animalId) {
 
     $validTypes = ['dog','cat','cow','buffalo','horse','goat','sheep','poultry','other'];
     if (!in_array($type, $validTypes, true)) {
-        respond(false, 'Invalid animal type', [], 422);
+        respond(false, 'Invalid animal type. Must be one of: ' . implode(', ', $validTypes), [], 422);
     }
 
     $stmt = $db->prepare('
@@ -57,11 +62,11 @@ if ($method === 'POST' && !$animalId) {
         trim($body['notes']      ?? ''),
     ]);
 
-    $newId = $db->lastInsertId();
-    respond(true, 'Animal added successfully', ['animal_id' => (int)$newId], 201);
+    $newId = (int)$db->lastInsertId();
+    respond(true, 'Animal added successfully', ['animal_id' => $newId], 201);
 }
 
-// ── GET single animal ──────────────────────────────────────────
+// ── GET: Single animal ────────────────────────────────────────
 if ($method === 'GET' && $animalId) {
     $stmt = $db->prepare('
         SELECT a.*, u.name AS owner_name, u.phone AS owner_phone
@@ -72,16 +77,15 @@ if ($method === 'GET' && $animalId) {
     ');
     $stmt->execute([$animalId]);
     $animal = $stmt->fetch();
-
     if (!$animal) respond(false, 'Animal not found', [], 404);
 
-    // Access control: owner sees own animals; doctor sees any (while treating)
+    // Access control
     if ($role === 'owner' && (int)$animal['owner_id'] !== $userId) {
         respond(false, 'Access denied', [], 403);
     }
 
-    // Latest treatments (last 10)
-    $stmt = $db->prepare('
+    // Last 10 treatments
+    $tStmt = $db->prepare('
         SELECT t.id, t.symptoms, t.diagnosis, t.status,
                t.requested_at, t.completed_at,
                u.name AS doctor_name
@@ -91,26 +95,24 @@ if ($method === 'GET' && $animalId) {
         ORDER BY t.requested_at DESC
         LIMIT 10
     ');
-    $stmt->execute([$animalId]);
-    $animal['recent_treatments'] = $stmt->fetchAll();
+    $tStmt->execute([$animalId]);
+    $animal['recent_treatments'] = $tStmt->fetchAll();
 
     // Vaccinations
-    $stmt = $db->prepare('
-        SELECT * FROM vaccinations WHERE animal_id = ? ORDER BY given_date DESC
-    ');
-    $stmt->execute([$animalId]);
-    $animal['vaccinations'] = $stmt->fetchAll();
+    $vStmt = $db->prepare('SELECT * FROM vaccinations WHERE animal_id = ? ORDER BY given_date DESC');
+    $vStmt->execute([$animalId]);
+    $animal['vaccinations'] = $vStmt->fetchAll();
 
     respond(true, 'Animal details', ['animal' => $animal]);
 }
 
-// ── GET list (owner's animals) ─────────────────────────────────
+// ── GET: List ─────────────────────────────────────────────────
 if ($method === 'GET' && !$animalId) {
     $ownerId = ($role === 'owner') ? $userId : (int)($_GET['owner_id'] ?? 0);
     if (!$ownerId) respond(false, 'owner_id required', [], 422);
 
-    $page  = max(1, (int)($_GET['page'] ?? 1));
-    $limit = min(50, (int)($_GET['limit'] ?? 20));
+    $page   = max(1,  (int)($_GET['page']  ?? 1));
+    $limit  = min(50, (int)($_GET['limit'] ?? 20));
     $offset = ($page - 1) * $limit;
 
     $stmt = $db->prepare('
@@ -123,31 +125,33 @@ if ($method === 'GET' && !$animalId) {
     $stmt->execute([$ownerId, $limit, $offset]);
     $animals = $stmt->fetchAll();
 
-    $total = $db->prepare('SELECT COUNT(*) FROM animals WHERE owner_id = ? AND is_active = 1');
-    $total->execute([$ownerId]);
+    $cntStmt = $db->prepare('SELECT COUNT(*) FROM animals WHERE owner_id = ? AND is_active = 1');
+    $cntStmt->execute([$ownerId]);
 
     respond(true, 'Animal list', [
-        'animals'   => $animals,
-        'total'     => (int) $total->fetchColumn(),
-        'page'      => $page,
-        'per_page'  => $limit,
+        'animals'  => $animals,
+        'total'    => (int)$cntStmt->fetchColumn(),
+        'page'     => $page,
+        'per_page' => $limit,
     ]);
 }
 
-// ── PUT: Update Animal ─────────────────────────────────────────
+// ── PUT: Update animal ────────────────────────────────────────
 if ($method === 'PUT' && $animalId) {
-    $body = body();
-
-    // Verify ownership
     $stmt = $db->prepare('SELECT owner_id FROM animals WHERE id = ? LIMIT 1');
     $stmt->execute([$animalId]);
     $row = $stmt->fetch();
     if (!$row) respond(false, 'Animal not found', [], 404);
-    if ((int)$row['owner_id'] !== $userId) respond(false, 'Access denied', [], 403);
+    if ($role === 'owner' && (int)$row['owner_id'] !== $userId) {
+        respond(false, 'Access denied', [], 403);
+    }
 
+    $body = body();
     $db->prepare('
         UPDATE animals
-        SET name=?, breed=?, gender=?, dob=?, weight_kg=?, color=?, allergies=?, notes=?
+        SET name=COALESCE(?,name), breed=COALESCE(?,breed), gender=COALESCE(?,gender),
+            dob=COALESCE(?,dob), weight_kg=COALESCE(?,weight_kg), color=COALESCE(?,color),
+            allergies=COALESCE(?,allergies), notes=COALESCE(?,notes)
         WHERE id=?
     ')->execute([
         $body['name']      ?? null,

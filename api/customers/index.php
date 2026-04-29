@@ -1,10 +1,10 @@
 <?php
-// backend/api/customers/index.php
-// GET    /api/customers             → list doctor's customers (with balance)
+// backend/api/customers/index.php  — FIXED
+// GET    /api/customers             → list with balance
 // POST   /api/customers             → add customer
-// GET    /api/customers/{id}        → customer detail + payment history
-// PUT    /api/customers/{id}        → update customer
-// POST   /api/customers/{id}/pay    → record payment or charge
+// GET    /api/customers?id=X        → customer detail + payments
+// PUT    /api/customers?id=X        → update
+// POST   /api/customers?id=X&action=pay → record payment/charge
 
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../middleware/auth.php';
@@ -20,19 +20,18 @@ $userId = $auth['sub'];
 $db     = Database::getConnection();
 $method = $_SERVER['REQUEST_METHOD'];
 
-// Parse URL
-$parts      = explode('/', trim(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH), '/'));
-$customerId = 0;
-$subAction  = '';
-foreach ($parts as $i => $part) {
-    if (is_numeric($part)) { $customerId = (int)$part; }
-    if ($part === 'pay') { $subAction = 'pay'; }
+// ── FIXED: Parse customer ID from ?id=N first ───────────────
+$customerId = (int)($_GET['id'] ?? 0);
+if (!$customerId) {
+    $lastSeg = basename(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH));
+    if (is_numeric($lastSeg)) $customerId = (int)$lastSeg;
 }
+$subAction = trim($_GET['action'] ?? '');
 
-// ── GET list ───────────────────────────────────────────────────
+// ── GET: List customers with computed balance ────────────────
 if ($method === 'GET' && !$customerId) {
-    $search = $_GET['search'] ?? '';
-    $page   = max(1, (int)($_GET['page'] ?? 1));
+    $search = trim($_GET['search'] ?? '');
+    $page   = max(1,  (int)($_GET['page']  ?? 1));
     $limit  = min(50, (int)($_GET['limit'] ?? 20));
     $offset = ($page - 1) * $limit;
 
@@ -45,15 +44,17 @@ if ($method === 'GET' && !$customerId) {
         $params[] = "%$search%";
     }
 
-    // Use the balance view
+    // ── Use LEFT JOIN on customer_payments for balance (avoids view dependency) ──
     $stmt = $db->prepare("
         SELECT c.id, c.name, c.phone, c.address, c.notes, c.created_at,
-               COALESCE(b.total_charged, 0) AS total_charged,
-               COALESCE(b.total_paid,    0) AS total_paid,
-               COALESCE(b.outstanding,   0) AS outstanding
+               COALESCE(SUM(CASE WHEN cp.type='charge'  THEN cp.amount ELSE 0 END), 0) AS total_charged,
+               COALESCE(SUM(CASE WHEN cp.type='payment' THEN cp.amount ELSE 0 END), 0) AS total_paid,
+               COALESCE(SUM(CASE WHEN cp.type='charge'  THEN cp.amount
+                                 WHEN cp.type='payment' THEN -cp.amount ELSE 0 END), 0) AS outstanding
         FROM customers c
-        LEFT JOIN v_customer_balance b ON b.customer_id = c.id
+        LEFT JOIN customer_payments cp ON cp.customer_id = c.id
         $where
+        GROUP BY c.id
         ORDER BY c.name ASC
         LIMIT $limit OFFSET $offset
     ");
@@ -62,24 +63,34 @@ if ($method === 'GET' && !$customerId) {
     respond(true, 'Customers', ['customers' => $stmt->fetchAll(), 'page' => $page]);
 }
 
-// ── GET single customer + payments ───────────────────────────
-if ($method === 'GET' && $customerId && !$subAction) {
+// ── GET: Customer detail + payments ─────────────────────────
+if ($method === 'GET' && $customerId && $subAction !== 'pay') {
     $stmt = $db->prepare('SELECT * FROM customers WHERE id = ? AND doctor_id = ? AND is_active = 1');
     $stmt->execute([$customerId, $userId]);
     $customer = $stmt->fetch();
     if (!$customer) respond(false, 'Customer not found', [], 404);
 
-    // Balance
-    $bStmt = $db->prepare('SELECT * FROM v_customer_balance WHERE customer_id = ?');
+    // Compute balance inline
+    $bStmt = $db->prepare("
+        SELECT
+            COALESCE(SUM(CASE WHEN type='charge'  THEN amount ELSE 0 END), 0) AS total_charged,
+            COALESCE(SUM(CASE WHEN type='payment' THEN amount ELSE 0 END), 0) AS total_paid,
+            COALESCE(SUM(CASE WHEN type='charge'  THEN amount
+                              WHEN type='payment' THEN -amount ELSE 0 END), 0) AS outstanding
+        FROM customer_payments WHERE customer_id = ?
+    ");
     $bStmt->execute([$customerId]);
     $balance = $bStmt->fetch();
+    $customer = array_merge($customer, $balance ?: [
+        'total_charged' => 0, 'total_paid' => 0, 'outstanding' => 0,
+    ]);
 
-    // Payment history
+    // Payments history
     $pStmt = $db->prepare('
-        SELECT cp.*, t.symptoms, a.name AS animal_name
+        SELECT cp.*, a.name AS animal_name
         FROM customer_payments cp
-        LEFT JOIN treatments t ON t.id = cp.treatment_id
-        LEFT JOIN animals a    ON a.id = t.animal_id
+        LEFT JOIN treatments t ON t.id  = cp.treatment_id
+        LEFT JOIN animals    a ON a.id  = t.animal_id
         WHERE cp.customer_id = ?
         ORDER BY cp.created_at DESC
         LIMIT 50
@@ -87,17 +98,13 @@ if ($method === 'GET' && $customerId && !$subAction) {
     $pStmt->execute([$customerId]);
 
     respond(true, 'Customer detail', [
-        'customer' => array_merge($customer, [
-            'total_charged' => $balance['total_charged'] ?? 0,
-            'total_paid'    => $balance['total_paid']    ?? 0,
-            'outstanding'   => $balance['outstanding']   ?? 0,
-        ]),
+        'customer' => $customer,
         'payments' => $pStmt->fetchAll(),
     ]);
 }
 
-// ── POST: Add customer ─────────────────────────────────────────
-if ($method === 'POST' && !$customerId) {
+// ── POST: Add customer ───────────────────────────────────────
+if ($method === 'POST' && !$customerId && $subAction !== 'pay') {
     $body = body();
     $name = trim($body['name'] ?? '');
     if (!$name) respond(false, 'name is required', [], 422);
@@ -118,9 +125,9 @@ if ($method === 'POST' && !$customerId) {
     respond(true, 'Customer added', ['customer_id' => (int)$db->lastInsertId()], 201);
 }
 
-// ── PUT: Update customer ───────────────────────────────────────
+// ── PUT: Update customer ─────────────────────────────────────
 if ($method === 'PUT' && $customerId) {
-    $stmt = $db->prepare('SELECT id FROM customers WHERE id = ? AND doctor_id = ?');
+    $stmt = $db->prepare('SELECT id FROM customers WHERE id = ? AND doctor_id = ? AND is_active = 1');
     $stmt->execute([$customerId, $userId]);
     if (!$stmt->fetch()) respond(false, 'Customer not found', [], 404);
 
@@ -143,15 +150,17 @@ if ($method === 'PUT' && $customerId) {
     respond(true, 'Customer updated');
 }
 
-// ── POST /customers/{id}/pay : Record charge or payment ────────
-if ($method === 'POST' && $customerId && $subAction === 'pay') {
-    $stmt = $db->prepare('SELECT id FROM customers WHERE id = ? AND doctor_id = ?');
+// ── POST: Record charge or payment ──────────────────────────
+// URL pattern: POST /customers?id=5&action=pay  OR  POST /customers/5/pay
+if (($method === 'POST' && $customerId) || ($method === 'POST' && $subAction === 'pay')) {
+    $stmt = $db->prepare('SELECT id FROM customers WHERE id = ? AND doctor_id = ? AND is_active = 1');
     $stmt->execute([$customerId, $userId]);
     if (!$stmt->fetch()) respond(false, 'Customer not found', [], 404);
 
     $body   = body();
     $amount = (float)($body['amount'] ?? 0);
-    $type   = in_array($body['type'] ?? '', ['charge', 'payment']) ? $body['type'] : 'charge';
+    $type   = in_array($body['type'] ?? '', ['charge', 'payment'], true)
+              ? $body['type'] : 'charge';
 
     if ($amount <= 0) respond(false, 'Amount must be positive', [], 422);
 
@@ -170,7 +179,14 @@ if ($method === 'POST' && $customerId && $subAction === 'pay') {
     ]);
 
     // Return updated balance
-    $bStmt = $db->prepare('SELECT * FROM v_customer_balance WHERE customer_id = ?');
+    $bStmt = $db->prepare("
+        SELECT
+            COALESCE(SUM(CASE WHEN type='charge'  THEN amount ELSE 0 END), 0) AS total_charged,
+            COALESCE(SUM(CASE WHEN type='payment' THEN amount ELSE 0 END), 0) AS total_paid,
+            COALESCE(SUM(CASE WHEN type='charge'  THEN amount
+                              WHEN type='payment' THEN -amount ELSE 0 END), 0) AS outstanding
+        FROM customer_payments WHERE customer_id = ?
+    ");
     $bStmt->execute([$customerId]);
 
     respond(true, $type === 'payment' ? 'Payment recorded' : 'Charge added', [

@@ -1,10 +1,7 @@
 <?php
-// backend/api/inventory/index.php
-// GET    /api/inventory            → list doctor's inventory
-// POST   /api/inventory            → add item
-// PUT    /api/inventory/{id}       → update item
-// DELETE /api/inventory/{id}       → soft-delete item
-// GET    /api/inventory/low-stock  → items below threshold
+// backend/api/inventory/index.php  — FIXED
+// ID is now read from ?id=N (query param) first, then URL path fallback.
+// The ?filter=low pattern for low-stock is also supported this way.
 
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../middleware/auth.php';
@@ -20,16 +17,22 @@ $userId = $auth['sub'];
 $db     = Database::getConnection();
 $method = $_SERVER['REQUEST_METHOD'];
 
-// Extract item ID from URL: /api/inventory/7  or  /api/inventory/low-stock
-$uriParts = explode('/', trim(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH), '/'));
-$lastPart = end($uriParts);
-$itemId   = is_numeric($lastPart) ? (int)$lastPart : 0;
-$action   = !is_numeric($lastPart) && $lastPart !== 'index.php' ? $lastPart : '';
+// ── FIXED: Parse item ID reliably ──────────────────────────
+$itemId = (int)($_GET['id'] ?? 0);
+if (!$itemId) {
+    $lastSeg = basename(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH));
+    if (is_numeric($lastSeg)) $itemId = (int)$lastSeg;
+}
 
-// ── GET low-stock ──────────────────────────────────────────────
-if ($method === 'GET' && $action === 'low-stock') {
+$filter = $_GET['filter'] ?? '';
+
+// ── GET: Low-stock items ────────────────────────────────────
+if ($method === 'GET' && $filter === 'low') {
     $stmt = $db->prepare('
-        SELECT * FROM inventory
+        SELECT *,
+               CASE WHEN expiry_date IS NOT NULL AND expiry_date != "0000-00-00"
+                    AND expiry_date < DATE_ADD(NOW(), INTERVAL 30 DAY) THEN 1 ELSE 0 END AS expiring_soon
+        FROM inventory
         WHERE doctor_id = ? AND is_active = 1 AND quantity <= low_stock_at
         ORDER BY quantity ASC
     ');
@@ -37,26 +40,27 @@ if ($method === 'GET' && $action === 'low-stock') {
     respond(true, 'Low stock items', ['items' => $stmt->fetchAll()]);
 }
 
-// ── GET list ───────────────────────────────────────────────────
+// ── GET: List ───────────────────────────────────────────────
 if ($method === 'GET' && !$itemId) {
-    $search = $_GET['search'] ?? '';
-    $page   = max(1, (int)($_GET['page'] ?? 1));
+    $search = trim($_GET['search'] ?? '');
+    $page   = max(1,  (int)($_GET['page']  ?? 1));
     $limit  = min(50, (int)($_GET['limit'] ?? 30));
     $offset = ($page - 1) * $limit;
 
-    $where  = 'WHERE i.doctor_id = ? AND i.is_active = 1';
+    $where  = 'WHERE doctor_id = ? AND is_active = 1';
     $params = [$userId];
 
     if ($search) {
-        $where   .= ' AND i.medicine_name LIKE ?';
+        $where   .= ' AND medicine_name LIKE ?';
         $params[] = "%$search%";
     }
 
     $stmt = $db->prepare("
         SELECT *,
                CASE WHEN quantity <= low_stock_at THEN 1 ELSE 0 END AS is_low_stock,
-               CASE WHEN expiry_date IS NOT NULL AND expiry_date < DATE_ADD(NOW(), INTERVAL 30 DAY) THEN 1 ELSE 0 END AS expiring_soon
-        FROM inventory i
+               CASE WHEN expiry_date IS NOT NULL AND expiry_date != '0000-00-00'
+                    AND expiry_date < DATE_ADD(NOW(), INTERVAL 30 DAY) THEN 1 ELSE 0 END AS expiring_soon
+        FROM inventory
         $where
         ORDER BY medicine_name ASC
         LIMIT $limit OFFSET $offset
@@ -64,36 +68,41 @@ if ($method === 'GET' && !$itemId) {
     $stmt->execute($params);
     $items = $stmt->fetchAll();
 
-    // Count totals
-    $total  = $db->prepare("SELECT COUNT(*) FROM inventory $where");
-    $total->execute($params);
+    $cntStmt = $db->prepare("SELECT COUNT(*) FROM inventory $where");
+    $cntStmt->execute($params);
+    $total = (int)$cntStmt->fetchColumn();
 
     respond(true, 'Inventory', [
         'items'    => $items,
-        'total'    => (int)$total->fetchColumn(),
+        'total'    => $total,
         'page'     => $page,
         'per_page' => $limit,
     ]);
 }
 
-// ── GET single ─────────────────────────────────────────────────
+// ── GET: Single item ────────────────────────────────────────
 if ($method === 'GET' && $itemId) {
-    $stmt = $db->prepare('SELECT * FROM inventory WHERE id = ? AND doctor_id = ? AND is_active = 1');
+    $stmt = $db->prepare('
+        SELECT * FROM inventory WHERE id = ? AND doctor_id = ? AND is_active = 1
+    ');
     $stmt->execute([$itemId, $userId]);
     $item = $stmt->fetch();
     if (!$item) respond(false, 'Item not found', [], 404);
     respond(true, 'Item', ['item' => $item]);
 }
 
-// ── POST: Add item ─────────────────────────────────────────────
+// ── POST: Add item ──────────────────────────────────────────
 if ($method === 'POST') {
     $body = body();
     $name = trim($body['medicine_name'] ?? '');
     if (!$name) respond(false, 'medicine_name is required', [], 422);
 
-    $qty   = max(0, (int)($body['quantity']    ?? 0));
-    $price = max(0, (float)($body['price']     ?? 0));
-    $low   = max(1, (int)($body['low_stock_at'] ?? 5));
+    $qty   = max(0,  (int)  ($body['quantity']     ?? 0));
+    $price = max(0,  (float)($body['price']        ?? 0));
+    $low   = max(1,  (int)  ($body['low_stock_at'] ?? 5));
+
+    // Sanitise expiry: blank string → null
+    $expiry = !empty($body['expiry_date']) ? $body['expiry_date'] : null;
 
     $stmt = $db->prepare('
         INSERT INTO inventory
@@ -106,7 +115,7 @@ if ($method === 'POST') {
         $qty,
         trim($body['unit']         ?? 'units'),
         $price,
-        $body['expiry_date']       ?: null,
+        $expiry,
         trim($body['batch_number'] ?? ''),
         $low,
     ]);
@@ -114,13 +123,14 @@ if ($method === 'POST') {
     respond(true, 'Item added', ['item_id' => (int)$db->lastInsertId()], 201);
 }
 
-// ── PUT: Update item ───────────────────────────────────────────
+// ── PUT: Update item ────────────────────────────────────────
 if ($method === 'PUT' && $itemId) {
-    $stmt = $db->prepare('SELECT id FROM inventory WHERE id = ? AND doctor_id = ?');
+    $stmt = $db->prepare('SELECT id FROM inventory WHERE id = ? AND doctor_id = ? AND is_active = 1');
     $stmt->execute([$itemId, $userId]);
     if (!$stmt->fetch()) respond(false, 'Item not found', [], 404);
 
-    $body = body();
+    $body   = body();
+    $expiry = !empty($body['expiry_date']) ? $body['expiry_date'] : null;
 
     $db->prepare('
         UPDATE inventory
@@ -134,22 +144,21 @@ if ($method === 'PUT' && $itemId) {
         WHERE id = ? AND doctor_id = ?
     ')->execute([
         $body['medicine_name'] ?? null,
-        isset($body['quantity'])    ? (int)$body['quantity']    : null,
+        isset($body['quantity'])     ? (int)   $body['quantity']     : null,
         $body['unit']          ?? null,
-        isset($body['price'])       ? (float)$body['price']     : null,
-        $body['expiry_date']   ?: null,
+        isset($body['price'])        ? (float)  $body['price']        : null,
+        $expiry,
         $body['batch_number']  ?? null,
-        isset($body['low_stock_at']) ? (int)$body['low_stock_at'] : null,
-        $itemId,
-        $userId,
+        isset($body['low_stock_at']) ? (int)   $body['low_stock_at'] : null,
+        $itemId, $userId,
     ]);
 
     respond(true, 'Item updated');
 }
 
-// ── DELETE: Soft-delete ────────────────────────────────────────
+// ── DELETE: Soft-delete ─────────────────────────────────────
 if ($method === 'DELETE' && $itemId) {
-    $stmt = $db->prepare('SELECT id FROM inventory WHERE id = ? AND doctor_id = ?');
+    $stmt = $db->prepare('SELECT id FROM inventory WHERE id = ? AND doctor_id = ? AND is_active = 1');
     $stmt->execute([$itemId, $userId]);
     if (!$stmt->fetch()) respond(false, 'Item not found', [], 404);
 
